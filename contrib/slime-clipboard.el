@@ -101,10 +101,12 @@ debugger to add the object at point to the clipboard."
   (or (get-text-property (point) 'slime-clipboard-ref)
       (error "No clipboard ref at point")))
 
-(defun slime-clipboard-inspect (&optional entry)
+(defun slime-clipboard-inspect (inspector-name &optional entry)
   "Inspect the current clipboard entry."
-  (interactive (list (slime-clipboard-ref-at-point)))
-  (slime-inspect (prin1-to-string `(swank-clipboard::clipboard-ref ,entry))))
+  (interactive (list (slime-maybe-read-inspector-name)
+                     (slime-clipboard-ref-at-point)))
+  (slime-inspect inspector-name (prin1-to-string
+                                 `(swank-clipboard::clipboard-ref ,entry))))
 
 (defun slime-clipboard-delete-entry (&optional entry)
   "Delete the current entry from the clipboard."
@@ -157,11 +159,14 @@ debugger to add the object at point to the clipboard."
     (current-window-configuration)
     k)))
 
+(defvar slime-inspector-name)
+
 (defun slime-clipboard-add-from-inspector ()
   (interactive)
   (let ((part (or (get-text-property (point) 'slime-part-number)
 		  (error "No part at point"))))
-    (slime-clipboard-add-internal `(:inspector ,part))))
+    (slime-clipboard-add-internal
+     `(:inspector ,(slime-inspector-name-symbol slime-inspector-name) ,part))))
 
 (defun slime-clipboard-add-from-sldb ()
   (interactive)

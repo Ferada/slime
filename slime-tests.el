@@ -934,11 +934,11 @@ Confirm that SUBFORM is correctly located."
       ((make-list 10))
       ('cons)
       (#'cons))
-  (slime-inspect (prin1-to-string exp))
+  (slime-inspect 'default (prin1-to-string exp))
   (cl-assert (not (slime-inspector-visible-p)))
   (slime-wait-condition "Inspector visible" #'slime-inspector-visible-p 5)
   (with-current-buffer (window-buffer (selected-window))
-    (slime-inspector-quit))
+    (slime-inspector-quit 'default))
   (slime-wait-condition "Inspector closed"
                         (lambda () (not (slime-inspector-visible-p)))
                         5)

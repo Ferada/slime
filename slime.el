@@ -724,10 +724,12 @@ corresponding values in the CDR of VALUE."
 (defvar slime-message-function 'message)
 
 ;; Interface
-(defun slime-buffer-name (type &optional hidden)
+(defun slime-buffer-name (type &optional hidden postfix)
   (cl-assert (keywordp type))
   (concat (if hidden " " "")
-          (format "*slime-%s*" (substring (symbol-name type) 1))))
+          (format "*slime-%s" (substring (symbol-name type) 1))
+          (and postfix (format "-%s" postfix))
+          "*"))
 
 ;; Interface
 (defun slime-message (format &rest args)
@@ -6355,12 +6357,32 @@ was called originally."
 
 (defvar slime-inspector-mark-stack '())
 
-(defun slime-inspect (string)
+(defvar slime-default-inspector-name 'default)
+(defvar slime-inspector-name)
+
+(defun slime-inspector-name-symbol (inspector-name)
+  (intern (format "%s::%s" 'swank-io-package inspector-name)))
+
+(defvar slime-inspector-name-history (list (prin1-to-string slime-default-inspector-name)))
+
+(defun slime-maybe-read-inspector-name ()
+  (cond
+   (current-prefix-arg
+    (read-from-minibuffer "Inspector: " (first slime-inspector-name-history)
+                          nil t '(slime-inspector-name-history . 1)))
+   ((boundp 'slime-inspector-name)
+    slime-inspector-name)
+   (t
+    slime-default-inspector-name)))
+
+(defun slime-inspect (inspector-name string)
   "Eval an expression and inspect the result."
   (interactive
-   (list (slime-read-from-minibuffer "Inspect value (evaluated): "
-				     (slime-sexp-at-point))))
-  (slime-eval-async `(swank:init-inspector ,string) 'slime-open-inspector))
+   (list
+    (slime-maybe-read-inspector-name)
+    (slime-read-from-minibuffer "Inspect value (evaluated): "
+                                (slime-sexp-at-point))))
+  (slime-eval-async `(swank:init-inspector ',(slime-inspector-name-symbol inspector-name) ,string) 'slime-open-inspector))
 
 (define-derived-mode slime-inspector-mode fundamental-mode
   "Slime-Inspector"
@@ -6371,12 +6393,14 @@ was called originally."
   (slime-set-truncate-lines)
   (setq buffer-read-only t))
 
-(defun slime-inspector-buffer ()
-  (or (get-buffer (slime-buffer-name :inspector))
-      (slime-with-popup-buffer ((slime-buffer-name :inspector)
+(defun slime-inspector-buffer (inspector-name)
+  (or (get-buffer (slime-buffer-name :inspector nil inspector-name))
+      (slime-with-popup-buffer ((slime-buffer-name :inspector nil inspector-name)
                                 :mode 'slime-inspector-mode)
         (setq slime-inspector-mark-stack '())
         (buffer-disable-undo)
+        (make-local-variable 'slime-inspector-name)
+        (setq slime-inspector-name inspector-name)
         (current-buffer))))
 
 (defmacro slime-inspector-fontify (face string)
@@ -6388,14 +6412,14 @@ was called originally."
   "Display INSPECTED-PARTS in a new inspector window.
 Optionally set point to POINT. If HOOK is provided, it is added to local
 KILL-BUFFER hooks for the inspector buffer."
-  (with-current-buffer (slime-inspector-buffer)
-    (when hook
-      (add-hook 'kill-buffer-hook hook t t))
-    (setq slime-buffer-connection (slime-current-connection))
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (pop-to-buffer (current-buffer))
-      (cl-destructuring-bind (&key id title content) inspected-parts
+  (cl-destructuring-bind (&key inspector-name id title content) inspected-parts
+    (with-current-buffer (slime-inspector-buffer inspector-name)
+      (when hook
+        (add-hook 'kill-buffer-hook hook t t))
+      (setq slime-buffer-connection (slime-current-connection))
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (pop-to-buffer (current-buffer))
         (cl-macrolet ((fontify (face string)
                                `(slime-inspector-fontify ,face ,string)))
           (slime-propertize-region
@@ -6491,17 +6515,17 @@ that value.
                         (slime-open-inspector parts)))))
     (cl-destructuring-bind (&optional property value)
         (slime-inspector-property-at-point)
-      (cl-case property
-        (slime-part-number
-         (slime-eval-async `(swank:inspect-nth-part ,value)
-           new-opener)
-         (push (slime-inspector-position) slime-inspector-mark-stack))
-        (slime-range-button
-         (slime-inspector-fetch-more value))
-        (slime-action-number
-         (slime-eval-async `(swank::inspector-call-nth-action ,value)
-           opener))
-        (t (error "No object at point"))))))
+        (cl-case property
+          (slime-part-number
+           (slime-eval-async `(swank:inspect-nth-part ',(slime-inspector-name-symbol slime-inspector-name) ,value)
+             new-opener)
+           (push (slime-inspector-position) slime-inspector-mark-stack))
+          (slime-range-button
+           (slime-inspector-fetch-more value))
+          (slime-action-number
+           (slime-eval-async `(swank::inspector-call-nth-action ',(slime-inspector-name-symbol slime-inspector-name) ,value)
+             opener))
+          (t (error "No object at point"))))))
 
 (defun slime-inspector-operate-on-click (event)
   "Move to events' position and operate the part."
@@ -6516,11 +6540,11 @@ that value.
           (t
            (error "No clickable part here")))))
 
-(defun slime-inspector-pop ()
+(defun slime-inspector-pop (inspector-name)
   "Reinspect the previous object."
-  (interactive)
+  (interactive (list (slime-maybe-read-inspector-name)))
   (slime-eval-async
-      `(swank:inspector-pop)
+      `(swank:inspector-pop ',(slime-inspector-name-symbol inspector-name))
     (lambda (result)
       (cond (result
              (slime-open-inspector result (pop slime-inspector-mark-stack)))
@@ -6528,20 +6552,20 @@ that value.
              (message "No previous object")
              (ding))))))
 
-(defun slime-inspector-next ()
+(defun slime-inspector-next (inspector-name)
   "Inspect the next object in the history."
-  (interactive)
-  (let ((result (slime-eval `(swank:inspector-next))))
+  (interactive (list (slime-maybe-read-inspector-name)))
+  (let ((result (slime-eval `(swank:inspector-next ',(slime-inspector-name-symbol inspector-name)))))
     (cond (result
 	   (push (slime-inspector-position) slime-inspector-mark-stack)
 	   (slime-open-inspector result))
 	  (t (message "No next object")
 	     (ding)))))
 
-(defun slime-inspector-quit ()
+(defun slime-inspector-quit (inspector-name)
   "Quit the inspector and kill the buffer."
-  (interactive)
-  (slime-eval-async `(swank:quit-inspector))
+  (interactive (list (slime-maybe-read-inspector-name)))
+  (slime-eval-async `(swank:quit-inspector ',(slime-inspector-name-symbol inspector-name)))
   (quit-window t))
 
 ;; FIXME: first return value is just point.
@@ -6602,42 +6626,43 @@ If ARG is negative, move forwards."
   (interactive "p")
   (slime-inspector-next-inspectable-object (- arg)))
 
-(defun slime-inspector-describe ()
-  (interactive)
-  (slime-eval-describe `(swank:describe-inspectee)))
+(defun slime-inspector-describe (inspector-name)
+  (interactive (list (slime-maybe-read-inspector-name)))
+  (slime-eval-describe `(swank:describe-inspectee ',(slime-inspector-name-symbol inspector-name))))
 
 (defun slime-inspector-pprint (part)
   (interactive (list (or (get-text-property (point) 'slime-part-number)
                          (error "No part at point"))))
-  (slime-eval-describe `(swank:pprint-inspector-part ,part)))
+  (slime-eval-describe `(swank:pprint-inspector-part ',(slime-inspector-name-symbol slime-inspector-name) ,part)))
 
-(defun slime-inspector-eval (string)
+(defun slime-inspector-eval (inspector-name string)
   "Eval an expression in the context of the inspected object."
-  (interactive (list (slime-read-from-minibuffer "Inspector eval: ")))
-  (slime-eval-with-transcript `(swank:inspector-eval ,string)))
+  (interactive (list (slime-maybe-read-inspector-name)
+                     (slime-read-from-minibuffer "Inspector eval: ")))
+  (slime-eval-with-transcript `(swank:inspector-eval ',(slime-inspector-name-symbol inspector-name) ,string)))
 
-(defun slime-inspector-history ()
+(defun slime-inspector-history (inspector-name)
   "Show the previously inspected objects."
-  (interactive)
-  (slime-eval-describe `(swank:inspector-history)))
+  (interactive (list (slime-maybe-read-inspector-name)))
+  (slime-eval-describe `(swank:inspector-history ',(slime-inspector-name-symbol inspector-name))))
 
 (defun slime-inspector-show-source (part)
   (interactive (list (or (get-text-property (point) 'slime-part-number)
                          (error "No part at point"))))
   (slime-eval-async
-      `(swank:find-source-location-for-emacs '(:inspector ,part))
+      `(swank:find-source-location-for-emacs '(:inspector ,(slime-inspector-name-symbol slime-inspector-name) ,part))
     #'slime-show-source-location))
 
-(defun slime-inspector-reinspect ()
-  (interactive)
-  (slime-eval-async `(swank:inspector-reinspect)
+(defun slime-inspector-reinspect (inspector-name)
+  (interactive (list (slime-maybe-read-inspector-name)))
+  (slime-eval-async `(swank:inspector-reinspect ',(slime-inspector-name-symbol inspector-name))
     (lexical-let ((point (slime-inspector-position)))
       (lambda (parts)
         (slime-open-inspector parts point)))))
 
-(defun slime-inspector-toggle-verbose ()
-  (interactive)
-  (slime-eval-async `(swank:inspector-toggle-verbose)
+(defun slime-inspector-toggle-verbose (inspector-name)
+  (interactive (list (slime-maybe-read-inspector-name)))
+  (slime-eval-async `(swank:inspector-toggle-verbose ',(slime-inspector-name-symbol inspector-name))
     (lexical-let ((point (slime-inspector-position)))
       (lambda (parts)
         (slime-open-inspector parts point)))))
@@ -6677,7 +6702,7 @@ If ARG is negative, move forwards."
       (slime-inspector-next-range chunk limit prev)
     (cond ((and from to)
            (slime-eval-async
-               `(swank:inspector-range ,from ,to)
+               `(swank:inspector-range ',(slime-inspector-name-symbol slime-inspector-name) ,from ,to)
              (slime-rcurry (lambda (chunk2 chunk1 limit prev cont)
                              (slime-inspector-fetch
                               (slime-inspector-join-chunks chunk1 chunk2)

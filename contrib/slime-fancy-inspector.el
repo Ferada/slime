@@ -12,10 +12,10 @@
   (:on-unload
    (remove-hook 'slime-edit-definition-hooks 'slime-edit-inspector-part)))
 
-(defun slime-inspect-definition ()
+(defun slime-inspect-definition (inspector-name)
   "Inspect definition at point"
-  (interactive)
-  (slime-inspect (slime-definition-at-point)))
+  (interactive (list (slime-maybe-read-inspector-name)))
+  (slime-inspect inspector-name (slime-definition-at-point)))
 
 (defun slime-disassemble-definition ()
   "Disassemble definition at point"
@@ -23,13 +23,15 @@
   (slime-eval-describe `(swank:disassemble-form
                          ,(slime-definition-at-point t))))
 
+(defvar slime-inspector-name)
+
 (defun slime-edit-inspector-part (name &optional where)
   (and (eq major-mode 'slime-inspector-mode)
        (cl-destructuring-bind (&optional property value)
            (slime-inspector-property-at-point)
          (when (eq property 'slime-part-number)
            (let ((location (slime-eval `(swank:find-definition-for-thing
-                                         (swank:inspector-nth-part ,value))))
+                                         (swank:inspector-nth-part ',(slime-inspector-name-symbol slime-inspector-name) ,value))))
                  (name (format "Inspector part %s" value)))
              (when (and (consp location)
                         (not (eq (car location) :error)))

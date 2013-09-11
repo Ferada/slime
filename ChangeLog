@@ -1,3 +1,48 @@
+2014-05-28  Olof-Joachim Frahm  <olof@macrolet.net>
+
+	Add indirection to allow for multiple inspectors.
+
+	Inspectors are identified by symbol, so from emacs the default is
+	called DEFAULT and additional ones can be used using the prefix
+	argument to each interactive function (when applicable).
+
+	Is still missing some functions, basics work though.
+
+	* slime.el (slime-buffer-name): Additional `postfix` argument.
+	(slime-inspect, slime-inspector-buffer, slime-inspector-pop)
+	(slime-inspector-next, slime-inspector-quit)
+	(slime-inspector-describe, slime-inspector-eval)
+	(slime-inspector-history, slime-inspector-reinspect)
+	(slime-inspector-toggle-verbose): Additional `inspector-name`
+	argument, which is set by `interactive`.
+	(slime-open-inspector, slime-inspector-operate-on-point)
+	(slime-inspector-pprint, slime-inspector-show-source)
+	(slime-inspector-fetch): Pass the `inspector-name` to the SWANK
+	side as a symbol.
+
+	* swank.lisp (value-spec-ref): `:inspector` ref gets a `name`
+	argument which refers to the inspector in question.
+	(reset-inspector, init-inspector, emacs-inspect/istate)
+	(istate>elisp, inspector-nth-part, inspect-nth-part)
+	(inspector-range, inspector-call-nth-action, inspector-pop)
+	(inspector-next, inspector-reinspect, inspector-toggle-verbose)
+	(inspector-eval, inspector-history, quit-inspector)
+	(describe-inspectee, pprint-inspector-part, inspect-in-frame)
+	(inspect-current-condition, inspect-frame-var): Additional `name`
+	argument like above.
+	(ensure-istate-metadata, print-part-to-string): Refer to the
+	inspector state indirectly by `*inspector-name*`.
+	(inspect-object): Inspector instance passed as additional argument.
+	(inspect-in-emacs): Add `name` argument as string designator for
+	the buffer name to be used.
+
+	* contrib/slime-repl.el (slime-repl-inspect): Additional
+	`inspector-name` argument to refer to the inspector in question.
+
+	* contrib/slime-fancy-inspector.el
+	(slime-inspector-copy-down-to-repl): Pass the
+	`slime-inspector-name` to the SWANK side as a symbol.
+
 2014-05-16  Helmut Eller  <heller@common-lisp.net>
 
 	Fix display related bugs.

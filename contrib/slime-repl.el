@@ -1579,11 +1579,13 @@ expansion will be added to the REPL's history.)"
             #'(lambda (_ignored)
                 (slime-repl-insert-prompt)))))))
 
+(defvar slime-inspector-name)
+
 (defun slime-inspector-copy-down-to-repl (number)
   "Evaluate the inspector slot at point via the REPL (to set `*')."
   (interactive (list (or (get-text-property (point) 'slime-part-number)
                          (error "No part at point"))))
-  (slime-repl-copy-down-to-repl 'swank:inspector-nth-part number))
+  (slime-repl-copy-down-to-repl 'swank:inspector-nth-part `',(slime-inspector-name-symbol slime-inspector-name) number))
 
 (defun sldb-copy-down-to-repl (frame-id var-id)
   "Evaluate the frame var at point via the REPL (to set `*')."
@@ -1770,11 +1772,13 @@ while ignoring the repl prompt text."
         (slime-sexp-at-point))
     (slime-sexp-at-point)))
 
-(defun slime-repl-inspect (string)
+(defun slime-repl-inspect (inspector-name string)
   (interactive
-   (list (slime-read-from-minibuffer "Inspect value (evaluated): "
-                                     (slime-repl-sexp-at-point))))
-  (slime-inspect string))
+   (list
+    (slime-maybe-read-inspector-name)
+    (slime-read-from-minibuffer "Inspect value (evaluated): "
+                                (slime-repl-sexp-at-point))))
+  (slime-inspect inspector-name string))
 
 (require 'bytecomp)
 

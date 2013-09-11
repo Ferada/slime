@@ -1981,15 +1981,16 @@ WHAT can be:
                (send-oob-to-emacs `(:ed ,target))))
             (t (error "No connection"))))))
 
-(defslimefun inspect-in-emacs (what &key wait)
+(defslimefun inspect-in-emacs (what &key wait name)
   "Inspect WHAT in Emacs. If WAIT is true (default NIL) blocks until the
-inspector has been closed in Emacs."
+inspector has been closed in Emacs. NAME names the buffer used."
   (flet ((send-it ()
            (let ((tag (when wait (make-tag)))
-                 (thread (when wait (current-thread-id))))
+                 (thread (when wait (current-thread-id)))
+                 (inspector (reset-inspector (intern (string (or name 'default))
+                                                     *swank-io-package*))))
              (with-buffer-syntax ()
-               (reset-inspector)
-               (send-oob-to-emacs `(:inspect ,(inspect-object what)
+               (send-oob-to-emacs `(:inspect ,(inspect-object inspector what)
                                              ,thread
                                              ,tag)))
              (when wait
@@ -2962,8 +2963,8 @@ If non-nil, called with two arguments SPEC and TRACED-P." )
     ((:string string package)
      (with-buffer-syntax (package)
        (eval (read-from-string string))))
-    ((:inspector part) 
-     (inspector-nth-part part))
+    ((:inspector name part)
+     (inspector-nth-part name part))
     ((:sldb frame var)
      (frame-var-value frame var))))
 
@@ -3108,49 +3109,83 @@ DSPEC is a string and LOCATION a source location. NAME is a string."
   content
   next previous)
 
-(defvar *istate* nil)
-(defvar *inspector-history*)
+(defvar *inspectors* nil)
+(defvar *inspector-name*)
 
-(defun reset-inspector ()
-  (setq *istate* nil
-        *inspector-history* (make-array 10 :adjustable t :fill-pointer 0)))
-  
-(defslimefun init-inspector (string)
+(defun %reset-inspector (inspector)
+  (setf (cadr inspector) NIL)
+  (setf (cddr inspector) (make-array 10 :adjustable t :fill-pointer 0))
+  inspector)
+
+(defun inspector.name (inspector)
+  (car inspector))
+
+(defun make-inspector (name)
+  (%reset-inspector (list* name NIL NIL)))
+
+(defun find-inspector (name)
+  (assoc name *inspectors*))
+
+(defun inspector (name)
+  (or (find-inspector name)
+      (car (push (make-inspector name) *inspectors*))))
+
+(defun istate (name)
+  (cadr (inspector name)))
+
+(defsetf istate (name) (new-istate)
+  `(setf (cadr (inspector ,name)) ,new-istate))
+
+(defun history (name)
+  (cddr (inspector name)))
+
+(defsetf history (name) (new-inspector-history)
+  `(setf (cddr (inspector ,name)) ,new-inspector-history))
+
+(defun reset-inspector (name)
+  (%reset-inspector (inspector name)))
+
+(defun kill-inspector (name)
+  (setf *inspectors* (delete name *inspectors* :key #'inspector.name)))
+
+(defslimefun init-inspector (name string)
   (with-buffer-syntax ()
     (with-retry-restart (:msg "Retry SLIME inspection request.")
-      (reset-inspector)
-      (inspect-object (eval (read-from-string string))))))
+      (inspect-object (reset-inspector name) (eval (read-from-string string))))))
 
 (defun ensure-istate-metadata (o indicator default)
-  (with-struct (istate. object metadata-plist) *istate*
+  (with-struct (istate. object metadata-plist) (istate *inspector-name*)
     (assert (eq object o))
     (let ((data (getf metadata-plist indicator default)))
       (setf (getf metadata-plist indicator) data)
       data)))
 
-(defun inspect-object (o)
-  (let* ((prev *istate*)
+(defun inspect-object (inspector o)
+  (let* ((prev (cadr inspector))
          (istate (make-istate :object o :previous prev
                               :verbose (cond (prev (istate.verbose prev))
                                              (t *inspector-verbose*)))))
-    (setq *istate* istate)
-    (setf (istate.content istate) (emacs-inspect/istate istate))
-    (unless (find o *inspector-history*)
-      (vector-push-extend o *inspector-history*))
+    (setf (cadr inspector) istate)
+    (setf (istate.content istate) (emacs-inspect/istate (inspector.name inspector) istate))
+    (unless (find o (cddr inspector))
+      (vector-push-extend o (cddr inspector)))
     (let ((previous (istate.previous istate)))
       (if previous (setf (istate.next previous) istate)))
-    (istate>elisp istate)))
+    (istate>elisp (car inspector) istate)))
 
-(defun emacs-inspect/istate (istate)
+(defun emacs-inspect/istate (name istate)
   (with-bindings (if (istate.verbose istate)
                      *inspector-verbose-printer-bindings*
                      *inspector-printer-bindings*)
-    (emacs-inspect (istate.object istate))))
+    (let ((*inspector-name* name))
+      (emacs-inspect (istate.object istate)))))
 
-(defun istate>elisp (istate)
-  (list :title (prepare-title istate)
-        :id (assign-index (istate.object istate) (istate.parts istate))
-        :content (prepare-range istate 0 500)))
+(defun istate>elisp (name istate)
+  (let ((*inspector-name* name))
+    (list :inspector-name name
+          :title (prepare-title istate)
+          :id (assign-index (istate.object istate) (istate.parts istate))
+          :content (prepare-range istate 0 500))))
 
 (defun prepare-title (istate)
   (if (istate.verbose istate)
@@ -3204,7 +3239,7 @@ DSPEC is a string and LOCATION a source location. NAME is a string."
 (defun print-part-to-string (value)
   (let* ((*print-readably* nil)
          (string (to-line value))
-         (pos (position value *inspector-history*)))
+         (pos (position value (history *inspector-name*))))
     (if pos
         (format nil "@~D=~A" pos string)
         string)))
@@ -3215,58 +3250,58 @@ DSPEC is a string and LOCATION a source location. NAME is a string."
             (subseq list start (min len end))))
     (lcons (llist-range list start end))))
 
-(defslimefun inspector-nth-part (index)
+(defslimefun inspector-nth-part (name index)
   "Return the current inspector's INDEXth part.
 The second value indicates if that part exists at all."
-  (let* ((parts (istate.parts *istate*))
+  (let* ((parts (istate.parts (istate name)))
          (foundp (< index (length parts))))
     (values (and foundp (aref parts index))
             foundp)))
 
-(defslimefun inspect-nth-part (index)
+(defslimefun inspect-nth-part (name index)
   (with-buffer-syntax ()
-    (inspect-object (inspector-nth-part index))))
+    (inspect-object (inspector name) (inspector-nth-part name index))))
 
-(defslimefun inspector-range (from to)
-  (prepare-range *istate* from to))
+(defslimefun inspector-range (name from to)
+  (prepare-range (istate name) from to))
 
-(defslimefun inspector-call-nth-action (index &rest args)
-  (destructuring-bind (fun refreshp) (aref (istate.actions *istate*) index)
+(defslimefun inspector-call-nth-action (name index &rest args)
+  (destructuring-bind (fun refreshp) (aref (istate.actions (istate name)) index)
     (apply fun args)
     (if refreshp
-        (inspector-reinspect)
+        (inspector-reinspect name)
         ;; tell emacs that we don't want to refresh the inspector buffer
         nil)))
 
-(defslimefun inspector-pop ()
+(defslimefun inspector-pop (name)
   "Inspect the previous object.
 Return nil if there's no previous object."
   (with-buffer-syntax ()
-    (cond ((istate.previous *istate*)
-           (setq *istate* (istate.previous *istate*))
-           (istate>elisp *istate*))
+    (cond ((istate.previous (istate name))
+           (setf (istate name) (istate.previous (istate name)))
+           (istate>elisp name (istate name)))
           (t nil))))
 
-(defslimefun inspector-next ()
+(defslimefun inspector-next (name)
   "Inspect the next element in the history of inspected objects.."
   (with-buffer-syntax ()
-    (cond ((istate.next *istate*)
-           (setq *istate* (istate.next *istate*))
-           (istate>elisp *istate*))
+    (cond ((istate.next (istate name))
+           (setf (istate name) (istate.next (istate name)))
+           (istate>elisp name (istate name)))
           (t nil))))
 
-(defslimefun inspector-reinspect ()
-  (let ((istate *istate*))
-    (setf (istate.content istate) (emacs-inspect/istate istate))
-    (istate>elisp istate)))
+(defslimefun inspector-reinspect (name)
+  (let ((istate (istate name)))
+    (setf (istate.content istate) (emacs-inspect/istate name istate))
+    (istate>elisp name istate)))
 
-(defslimefun inspector-toggle-verbose ()
+(defslimefun inspector-toggle-verbose (name)
   "Toggle verbosity of inspected object."
-  (setf (istate.verbose *istate*) (not (istate.verbose *istate*)))
-  (istate>elisp *istate*))
+  (setf (istate.verbose (istate name)) (not (istate.verbose (istate name))))
+  (istate>elisp name (istate name)))
 
-(defslimefun inspector-eval (string)
-  (let* ((obj (istate.object *istate*))
+(defslimefun inspector-eval (name string)
+  (let* ((obj (istate.object (istate name)))
          (context (eval-context obj))
          (form (with-buffer-syntax ((cdr (assoc '*package* context)))
                  (read-from-string string)))
@@ -3278,52 +3313,49 @@ Return nil if there's no previous object."
                         (declare (ignorable . ,ignorable))
                         ,form)))))
 
-(defslimefun inspector-history ()
+(defslimefun inspector-history (name)
   (with-output-to-string (out)
-    (let ((newest (loop for s = *istate* then next
+    (let ((newest (loop for s = (istate name) then next
                         for next = (istate.next s)
                         if (not next) return s)))
       (format out "--- next/prev chain ---")
       (loop for s = newest then (istate.previous s) while s do
             (let ((val (istate.object s)))
-              (format out "~%~:[  ~; *~]@~d " 
-                      (eq s *istate*)
-                      (position val *inspector-history*))
+              (format out "~%~:[  ~; *~]@~d "
+                      (eq s (istate name))
+                      (position val (history name)))
               (print-unreadable-object (val out :type t :identity t)))))
     (format out "~%~%--- all visited objects ---")
-    (loop for val across *inspector-history* for i from 0 do
+    (loop for val across (history name) for i from 0 do
           (format out "~%~2,' d " i)
           (print-unreadable-object (val out :type t :identity t)))))
 
-(defslimefun quit-inspector ()
-  (reset-inspector)
+(defslimefun quit-inspector (name)
+  (kill-inspector name)
   nil)
 
-(defslimefun describe-inspectee ()
+(defslimefun describe-inspectee (name)
   "Describe the currently inspected object."
   (with-buffer-syntax ()
-    (describe-to-string (istate.object *istate*))))
+    (describe-to-string (istate.object (istate name)))))
 
-(defslimefun pprint-inspector-part (index)
+(defslimefun pprint-inspector-part (name index)
   "Pretty-print the currently inspected object."
   (with-buffer-syntax ()
-    (swank-pprint (list (inspector-nth-part index)))))
+    (swank-pprint (list (inspector-nth-part name index)))))
 
-(defslimefun inspect-in-frame (string index)
+(defslimefun inspect-in-frame (name string index)
   (with-buffer-syntax ()
     (with-retry-restart (:msg "Retry SLIME inspection request.")
-      (reset-inspector)
-      (inspect-object (eval-in-frame (from-string string) index)))))
+      (inspect-object (reset-inspector name) (eval-in-frame (from-string string) index)))))
 
-(defslimefun inspect-current-condition ()
+(defslimefun inspect-current-condition (name)
   (with-buffer-syntax ()
-    (reset-inspector)
-    (inspect-object *swank-debugger-condition*)))
+    (inspect-object (reset-inspector name) *swank-debugger-condition*)))
 
-(defslimefun inspect-frame-var (frame var)
+(defslimefun inspect-frame-var (name frame var)
   (with-buffer-syntax ()
-    (reset-inspector)
-    (inspect-object (frame-var-value frame var))))
+    (inspect-object (reset-inspector name) (frame-var-value frame var))))
 
 ;;;;; Lists
 
